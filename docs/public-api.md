@@ -41,15 +41,16 @@ key's next request. Revoked keys stay in the list as an audit trail.
 A key can do only what its scopes allow — independent of who created
 it. Grant the minimum.
 
-| Scope                | Allows                                   |
-| -------------------- | ---------------------------------------- |
-| `messages:send`      | Send WhatsApp messages                   |
-| `messages:read`      | Read messages and delivery status        |
-| `contacts:read`      | List and read contacts                   |
-| `contacts:write`     | Create and update contacts               |
-| `conversations:read` | List and read conversations              |
-| `broadcasts:send`    | Launch broadcast campaigns               |
-| `webhooks:manage`    | Register and manage outbound webhooks    |
+| Scope                | Allows                                 |
+| -------------------- | -------------------------------------- |
+| `messages:send`      | Send WhatsApp messages                 |
+| `messages:read`      | Read messages and delivery status      |
+| `contacts:read`      | List and read contacts                 |
+| `contacts:write`     | Create and update contacts             |
+| `leads:write`        | Create retry-safe external sales leads |
+| `conversations:read` | List and read conversations            |
+| `broadcasts:send`    | Launch broadcast campaigns             |
+| `webhooks:manage`    | Register and manage outbound webhooks  |
 
 A key with **no scopes** still authenticates and can call
 `GET /api/v1/me` — useful for verifying a key works.
@@ -69,14 +70,14 @@ Every response uses one of two shapes:
 Branch on `error.code` (stable); `error.message` is for humans and
 may be reworded.
 
-| Status | `code`         | Meaning                                          |
-| ------ | -------------- | ------------------------------------------------ |
+| Status | `code`         | Meaning                                               |
+| ------ | -------------- | ----------------------------------------------------- |
 | 401    | `unauthorized` | Missing / malformed / unknown / revoked / expired key |
-| 403    | `forbidden`    | Valid key, but missing the required scope        |
-| 429    | `rate_limited` | Per-key rate limit exceeded                      |
-| 400    | `bad_request`  | Malformed input                                  |
-| 404    | `not_found`    | No such resource                                 |
-| 500    | `internal`     | Server error                                     |
+| 403    | `forbidden`    | Valid key, but missing the required scope             |
+| 429    | `rate_limited` | Per-key rate limit exceeded                           |
+| 400    | `bad_request`  | Malformed input                                       |
+| 404    | `not_found`    | No such resource                                      |
+| 500    | `internal`     | Server error                                          |
 
 ## Rate limits
 
@@ -140,9 +141,9 @@ curl -X POST https://your-crm.example.com/api/v1/messages \
   "template": {
     "name": "order_update",
     "language": "en_US",
-    "params": ["A123"]        // positional body vars, or a structured object
+    "params": ["A123"], // positional body vars, or a structured object
   },
-  "reply_to_message_id": "<uuid>"   // optional; must be in the same conversation
+  "reply_to_message_id": "<uuid>", // optional; must be in the same conversation
 }
 ```
 
@@ -174,10 +175,15 @@ or phone) and `?tag=<tagId>`.
 {
   "data": [
     {
-      "id": "…", "phone": "+14155550123", "name": "Jane Doe",
-      "email": null, "company": "Acme", "avatar_url": null,
+      "id": "…",
+      "phone": "+14155550123",
+      "name": "Jane Doe",
+      "email": null,
+      "company": "Acme",
+      "avatar_url": null,
       "tags": [{ "id": "…", "name": "vip", "color": "#3b82f6" }],
-      "created_at": "…", "updated_at": "…"
+      "created_at": "…",
+      "updated_at": "…"
     }
   ],
   "meta": { "next_cursor": "…" }
@@ -199,6 +205,57 @@ Read or update one contact. Scopes: `contacts:read` / `contacts:write`.
 `PATCH` updates only the fields you send (`name`, `email`, `company`);
 pass `tags` (an array of tag names) to replace the contact's tags. A
 contact in another account returns `404`.
+
+### `POST /api/v1/leads`
+
+Create a contact + sales deal from an external CRM. Scope:
+`leads:write`. Before using the endpoint, an account admin must choose
+the target pipeline, initial stage, and optional default salesperson in
+**Settings → Deals & currency → External lead intake**.
+
+`source` and `external_id` form an idempotency key within the account.
+The first successful request returns `201`; retries return the same deal
+with `200`. A retry never moves a deal back to its initial stage or
+overwrites assignment/status changes made by a salesperson.
+
+```json
+{
+  "source": "devine_b2b",
+  "external_id": "<stable-source-lead-id>",
+  "title": "B2B dealer enquiry",
+  "contact": {
+    "phone": "+919876543210",
+    "name": "Buyer name",
+    "email": "buyer@example.com",
+    "company": "Buyer company"
+  },
+  "sales_intent": "high",
+  "requested_action": "Discuss order",
+  "assigned_to_user_id": "<optional-account-user-uuid>",
+  "tag_ids": ["<existing-account-tag-uuid>"],
+  "custom_fields": {
+    "<existing-account-custom-field-uuid>": "Qualification value"
+  }
+}
+```
+
+Tags and custom fields must already belong to the API key's account.
+Provided tags are added without removing unrelated tags; provided custom
+field values are upserted, and `null` clears a value. An optional
+`assigned_to_user_id` overrides the configured default salesperson and
+must identify a non-viewer member of the same account.
+
+This endpoint intentionally does **not** create a conversation, send a
+WhatsApp message, run tag-triggered automations, or change Meta webhook
+ownership. Conversation synchronization requires a separate integration.
+
+### `GET /api/v1/leads/options`
+
+Return the configured pipeline/stage plus the account's approved tags,
+custom fields, and assignable salespeople. Scope: `leads:write`. Use the
+returned UUIDs/user IDs to construct `POST /api/v1/leads`; no direct
+database access is needed. `enabled: false` means an admin still needs to
+complete or enable External lead intake in Settings.
 
 ### `GET /api/v1/conversations`
 
@@ -289,11 +346,11 @@ things happen in your account. **Migration required:** apply
 
 ### Events
 
-| Event                    | Fires when                                        |
-| ------------------------ | ------------------------------------------------- |
-| `message.received`       | An inbound message arrives from a contact         |
-| `message.status_updated` | A message you sent changed delivery status        |
-| `conversation.created`   | A new conversation is opened for a contact        |
+| Event                    | Fires when                                 |
+| ------------------------ | ------------------------------------------ |
+| `message.received`       | An inbound message arrives from a contact  |
+| `message.status_updated` | A message you sent changed delivery status |
+| `conversation.created`   | A new conversation is opened for a contact |
 
 ### Managing endpoints
 
@@ -324,7 +381,7 @@ delivery uuid you can dedupe on, and `data` varies by `event`:
   "event": "message.received",
   "occurred_at": "2026-07-01T12:00:00.000Z",
   "account_id": "…",
-  "data": { /* per-event, see below */ }
+  "data": {/* per-event, see below */}
 }
 ```
 
@@ -350,8 +407,10 @@ a few minutes old (replay protection).
 
 ```js
 const [, t, v1] = header.match(/t=(\d+),v1=([0-9a-f]+)/);
-const expected = crypto.createHmac('sha256', secret)
-  .update(`${t}.${rawBody}`).digest('hex');
+const expected = crypto
+  .createHmac('sha256', secret)
+  .update(`${t}.${rawBody}`)
+  .digest('hex');
 const ok = crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(v1));
 ```
 
@@ -376,8 +435,8 @@ internal targets are refused at delivery time.
 
 ## Roadmap
 
-The public API now covers messaging, contacts, conversations,
-broadcasts, and outbound webhooks — the full scope of
+The public API now covers messaging, contacts, external lead intake,
+conversations, broadcasts, and outbound webhooks — the full scope of
 [#245](https://github.com/ArnasDon/wacrm/issues/245). Future ideas
-(deals/pipelines, templates, flows, a delivery queue for webhooks) are
+(general deals/pipelines CRUD, templates, flows, a delivery queue for webhooks) are
 not yet scheduled.
